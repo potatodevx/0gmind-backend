@@ -1,18 +1,15 @@
 import { ethers } from 'ethers';
-import axios from 'axios';
+import { Indexer } from '@0glabs/0g-ts-sdk';
 import { ZeroGStorageUploadResult } from '../types';
 
 const ZERO_G_RPC = process.env.ZERO_G_RPC || 'https://evmrpc-testnet.0g.ai';
-const ZERO_G_STORAGE_INDEXER = process.env.ZERO_G_STORAGE_INDEXER || 'https://indexer-storage-testnet-standard.0g.ai';
-const FLOW_CONTRACT = process.env.FLOW_CONTRACT || '0x22E03a6A89B950F1c82ec5e74F8eCa321a105296';
+const ZERO_G_STORAGE_INDEXER =
+  process.env.ZERO_G_STORAGE_INDEXER ||
+  'https://indexer-storage-testnet-turbo.0g.ai';
 const PRIVATE_KEY = process.env.BACKEND_PRIVATE_KEY || '';
 
-const FLOW_ABI = [
-  'function submit(tuple(bytes32 dataRoot, uint256 epochNumber, uint256 quorumRequired, bytes tags, tuple(uint256 startSegmentIndex, uint256 numSegments, bytes32 merkleRoot, bytes32 dataRoot)[] nodes) submission) payable',
-  'function getFlow(bytes32 dataRoot) view returns (tuple(uint256 length, uint256 tags))',
-];
-
-function encryptContent(content: string): { encrypted: string; key: string } {
+// ─── Encryption helpers (XOR — demo-grade, sufficient for hackathon) ──────────
+export function encryptContent(content: string): { encrypted: string; key: string } {
   const key = ethers.hexlify(ethers.randomBytes(32));
   const contentBytes = Buffer.from(content, 'utf8');
   const keyBytes = Buffer.from(key.slice(2), 'hex');
@@ -20,13 +17,10 @@ function encryptContent(content: string): { encrypted: string; key: string } {
   for (let i = 0; i < contentBytes.length; i++) {
     encrypted[i] = contentBytes[i] ^ keyBytes[i % keyBytes.length];
   }
-  return {
-    encrypted: encrypted.toString('base64'),
-    key,
-  };
+  return { encrypted: encrypted.toString('base64'), key };
 }
 
-function decryptContent(encrypted: string, key: string): string {
+export function decryptContent(encrypted: string, key: string): string {
   const encryptedBytes = Buffer.from(encrypted, 'base64');
   const keyBytes = Buffer.from(key.slice(2), 'hex');
   const decrypted = Buffer.alloc(encryptedBytes.length);
@@ -36,6 +30,7 @@ function decryptContent(encrypted: string, key: string): string {
   return decrypted.toString('utf8');
 }
 
+// ─── Upload ────────────────────────────────────────────────────────────────────
 export async function uploadToZeroGStorage(
   content: string,
   metadata: Record<string, unknown>
@@ -48,68 +43,55 @@ export async function uploadToZeroGStorage(
   });
 
   const dataBuffer = Buffer.from(payload, 'utf8');
-  const dataHash = ethers.keccak256(dataBuffer);
 
+  // ── No private key → deterministic mock (dev only) ──
   if (!PRIVATE_KEY) {
-    // Mock response for environments without a private key configured
-    const mockRootHash = ethers.keccak256(Buffer.from(content + Date.now().toString()));
+    console.warn('[0G Storage] BACKEND_PRIVATE_KEY not set — using deterministic mock. Set it to use real 0G Storage.');
+    const rootHash = ethers.keccak256(dataBuffer);
     return {
-      rootHash: mockRootHash,
+      rootHash,
       txHash: ethers.keccak256(Buffer.from('mock-tx-' + Date.now())),
       size: dataBuffer.length,
     };
   }
 
+  // ── Real upload via @0glabs/0g-ts-sdk ──────────────────────────────────────
   try {
     const provider = new ethers.JsonRpcProvider(ZERO_G_RPC);
-    const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+    const signer = new ethers.Wallet(PRIVATE_KEY, provider);
+    const indexer = new Indexer(ZERO_G_STORAGE_INDEXER);
 
-    // Use 0G Storage Node API for upload
-    const uploadResponse = await axios.post(
-      `${ZERO_G_STORAGE_INDEXER}/upload`,
-      {
-        data: dataBuffer.toString('base64'),
-        tags: '0x',
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Wallet-Address': wallet.address,
-        },
-        timeout: 30000,
-      }
-    );
+    // Write payload to a temp file so the SDK can build the merkle tree
+    const os = await import('os');
+    const path = await import('path');
+    const fs = await import('fs');
+    const tmpFile = path.join(os.tmpdir(), `0gmind-${Date.now()}.json`);
+    fs.writeFileSync(tmpFile, payload, 'utf8');
 
-    const rootHash = uploadResponse.data?.rootHash || dataHash;
+    // The SDK needs a ZgFile — import dynamically to avoid ESM issues
+    const { ZgFile } = await import('@0glabs/0g-ts-sdk');
+    const zgFile = await ZgFile.fromFilePath(tmpFile);
+    const [tree, treeErr] = await zgFile.merkleTree();
+    if (treeErr !== null) throw new Error(`Merkle tree error: ${treeErr}`);
 
-    const flowContract = new ethers.Contract(FLOW_CONTRACT, FLOW_ABI, wallet);
-    const feeData = await provider.getFeeData();
-    const gasPrice = feeData.gasPrice || ethers.parseUnits('1', 'gwei');
+    const rootHash = (tree as { rootHash(): string }).rootHash();
+    console.log('[0G Storage] Uploading blob, root hash:', rootHash);
 
-    const tx = await flowContract.submit(
-      {
-        dataRoot: rootHash,
-        epochNumber: 0,
-        quorumRequired: 1,
-        tags: '0x',
-        nodes: [],
-      },
-      {
-        value: ethers.parseEther('0.0001'),
-        gasPrice,
-      }
-    );
+    const [tx, uploadErr] = await indexer.upload(zgFile, ZERO_G_RPC, signer);
+    if (uploadErr !== null) throw new Error(`Upload error: ${uploadErr}`);
 
-    const receipt = await tx.wait();
+    await zgFile.close();
+    fs.unlinkSync(tmpFile);
 
-    return {
-      rootHash,
-      txHash: receipt.hash,
-      size: dataBuffer.length,
-    };
+    // The SDK returns either { rootHash, txHash } or { rootHashes, txHashes }
+    const txResult = tx as unknown as { txHash?: string; txHashes?: string[] };
+    const txHash = txResult.txHash ?? txResult.txHashes?.[0] ?? '0x' + '0'.repeat(64);
+
+    console.log('[0G Storage] Upload success. txHash:', txHash);
+    return { rootHash, txHash, size: dataBuffer.length };
   } catch (error) {
-    console.error('0G Storage upload error:', error);
-    // Fallback: compute deterministic hash and return
+    console.error('[0G Storage] Upload failed, falling back to hash-only:', error);
+    // Deterministic fallback — blob ID derived from content hash
     const rootHash = ethers.keccak256(dataBuffer);
     return {
       rootHash,
@@ -119,23 +101,34 @@ export async function uploadToZeroGStorage(
   }
 }
 
+// ─── Download ──────────────────────────────────────────────────────────────────
 export async function downloadFromZeroGStorage(rootHash: string): Promise<string | null> {
-  try {
-    const response = await axios.get(
-      `${ZERO_G_STORAGE_INDEXER}/file/${rootHash}`,
-      { timeout: 30000 }
-    );
-
-    if (response.data) {
-      const rawData = Buffer.from(response.data, 'base64').toString('utf8');
-      const parsed = JSON.parse(rawData);
-      return parsed.content || rawData;
-    }
+  if (!PRIVATE_KEY) {
+    console.warn('[0G Storage] BACKEND_PRIVATE_KEY not set — cannot download from 0G Storage.');
     return null;
+  }
+
+  try {
+    const provider = new ethers.JsonRpcProvider(ZERO_G_RPC);
+    const signer = new ethers.Wallet(PRIVATE_KEY, provider);
+    const indexer = new Indexer(ZERO_G_STORAGE_INDEXER);
+
+    const os = await import('os');
+    const path = await import('path');
+    const fs = await import('fs');
+    const tmpFile = path.join(os.tmpdir(), `0gmind-dl-${Date.now()}.json`);
+
+    const downloadResult = await indexer.download(rootHash, tmpFile, false);
+    const downloadErr = Array.isArray(downloadResult) ? downloadResult[1] : downloadResult;
+    if (downloadErr !== null) throw new Error(`Download error: ${String(downloadErr)}`);
+
+    const raw = fs.readFileSync(tmpFile, 'utf8');
+    fs.unlinkSync(tmpFile);
+
+    const parsed = JSON.parse(raw);
+    return parsed.content || raw;
   } catch (error) {
-    console.error('0G Storage download error:', error);
+    console.error('[0G Storage] Download failed:', error);
     return null;
   }
 }
-
-export { encryptContent, decryptContent };

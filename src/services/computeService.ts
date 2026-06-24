@@ -1,15 +1,19 @@
 import OpenAI from 'openai';
 
-const ZERO_G_COMPUTE_BASE_URL = process.env.ZERO_G_COMPUTE_BASE_URL || 'https://api.0g.ai/v1';
+// 0G Compute Router — get API key at pc.0g.ai → Dashboard → API Keys
+const ZERO_G_COMPUTE_BASE_URL = process.env.ZERO_G_COMPUTE_BASE_URL || 'https://router-api.0g.ai/v1';
 const ZERO_G_COMPUTE_API_KEY = process.env.ZERO_G_COMPUTE_API_KEY || '';
-const ZERO_G_COMPUTE_MODEL = process.env.ZERO_G_COMPUTE_MODEL || 'glm-4';
+const ZERO_G_COMPUTE_MODEL = process.env.ZERO_G_COMPUTE_MODEL || 'glm-5';
 
 let client: OpenAI | null = null;
 
 function getClient(): OpenAI {
+  if (!ZERO_G_COMPUTE_API_KEY) {
+    console.warn('[0G Compute] ZERO_G_COMPUTE_API_KEY not set — inference calls will fail. Get a key at pc.0g.ai');
+  }
   if (!client) {
     client = new OpenAI({
-      apiKey: ZERO_G_COMPUTE_API_KEY || 'placeholder',
+      apiKey: ZERO_G_COMPUTE_API_KEY || 'missing-key',
       baseURL: ZERO_G_COMPUTE_BASE_URL,
     });
   }

@@ -1,92 +1,95 @@
-import OpenAI from 'openai';
-
 // Read lazily so dotenv.config() (called in index.ts) is always applied first
 const getComputeUrl = () => process.env.ZERO_G_COMPUTE_BASE_URL || 'https://router-api.0g.ai/v1';
 const getComputeKey = () => process.env.ZERO_G_COMPUTE_API_KEY || '';
 const getComputeModel = () => process.env.ZERO_G_COMPUTE_MODEL || 'glm-5';
 
-// Client is re-created if key changes (e.g. env reload on nodemon restart)
-let client: OpenAI | null = null;
-let cachedKey = '';
-
-function getClient(): OpenAI {
+// Use fetch directly so 0G-specific extensions like chat_template_kwargs
+// are not stripped by the OpenAI SDK's type-checked request builder.
+async function zeroGChat(messages: { role: string; content: string }[], maxTokens = 500): Promise<string> {
   const key = getComputeKey();
   if (!key) {
     console.warn('[0G Compute] ZERO_G_COMPUTE_API_KEY not set — inference calls will fail. Get a key at pc.0g.ai');
+    throw new Error('missing api key');
   }
-  if (!client || cachedKey !== key) {
-    cachedKey = key;
-    client = new OpenAI({
-      apiKey: key || 'missing-key',
-      baseURL: getComputeUrl(),
-    });
+
+  const body = {
+    model: getComputeModel(),
+    messages,
+    max_tokens: maxTokens,
+    temperature: 0.7,
+    chat_template_kwargs: { enable_thinking: false },
+  };
+
+  const res = await fetch(`${getComputeUrl()}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30000),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`0G Compute HTTP ${res.status}: ${err}`);
   }
-  return client;
+
+  const data = await res.json() as {
+    choices?: { message?: { content?: string | null; reasoning_content?: string } }[];
+  };
+  const msg = data.choices?.[0]?.message;
+  // glm-5 thinking mode puts the answer in content; fallback to reasoning_content if present
+  const content = msg?.content || msg?.reasoning_content;
+  if (!content) {
+    console.error('[0G Compute] unexpected response shape:', JSON.stringify(data).slice(0, 300));
+    throw new Error('empty response from 0G Compute');
+  }
+  return content;
 }
 
 export async function summarizeContext(content: string): Promise<string> {
   try {
-    const openai = getClient();
-    const response = await openai.chat.completions.create({
-      model: getComputeModel(),
-      messages: [
+    return await zeroGChat(
+      [
         {
           role: 'system',
           content:
-            'You are a context summarizer. Given an AI agent conversation or context, produce a concise 2-3 sentence summary describing the key information, goals, and state of the context. This summary will be shown as a preview.',
+            'You are a context summarizer. Given an AI agent conversation, produce a concise 2-3 sentence summary of the key information and topics covered. Keep it under 60 words.',
         },
         {
           role: 'user',
           content: `Summarize this AI context:\n\n${content.slice(0, 4000)}`,
         },
       ],
-      max_tokens: 150,
-      temperature: 0.3,
-    });
-
-    return response.choices[0]?.message?.content || 'Context stored successfully on 0G.';
+      150
+    );
   } catch (error) {
-    console.error('0G Compute summarize error:', error);
+    console.error('[0G Compute] summarize error:', error);
     const words = content.split(' ').slice(0, 20).join(' ');
     return `Context: ${words}...`;
   }
 }
 
-export async function processContextForAgent(
-  contextContent: string,
-  userQuery: string
-): Promise<string> {
+export async function processContextForAgent(contextContent: string, userQuery: string): Promise<string> {
   try {
-    const openai = getClient();
-    const response = await openai.chat.completions.create({
-      model: getComputeModel(),
-      messages: [
-        {
-          role: 'system',
-          content: `You are an AI agent with access to the following stored context from 0G Storage:\n\n${contextContent}\n\nUse this context to answer the user's query. The context represents the memory and state of a previous AI session.`,
-        },
-        {
-          role: 'user',
-          content: userQuery,
-        },
-      ],
-      max_tokens: 500,
-      temperature: 0.7,
-    });
-
-    return (
-      response.choices[0]?.message?.content ||
-      'I have loaded your context from 0G Storage and am ready to continue.'
-    );
+    return await zeroGChat([
+      {
+        role: 'system',
+        content: `You are an AI agent with access to the following stored context from 0G Storage:\n\n${contextContent}\n\nUse this context to answer the user's query accurately and concisely.`,
+      },
+      {
+        role: 'user',
+        content: userQuery,
+      },
+    ]);
   } catch (error) {
-    console.error('0G Compute process error:', error);
-    // Graceful fallback: scan context for relevant sentences
+    console.error('[0G Compute] inference error:', error);
     return localContextSearch(contextContent, userQuery);
   }
 }
 
-// Simple local keyword-match fallback used when 0G Compute key is not yet set.
-// Returns relevant lines from the context rather than a generic stub.
+// Keyword-match fallback when 0G Compute key is missing or unreachable.
 function localContextSearch(context: string, query: string): string {
   const queryWords = query.toLowerCase().split(/\W+/).filter(w => w.length > 3);
   const lines = context.split(/[\n.]+/).map(l => l.trim()).filter(l => l.length > 10);

@@ -224,7 +224,7 @@ router.post('/chat', async (req: Request, res: Response) => {
 // GET /api/context/:id/metadata
 router.get('/:id/metadata', async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const meta = contextStore.get(id);
 
     if (!meta) {

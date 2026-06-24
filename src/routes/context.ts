@@ -6,7 +6,9 @@ import { StoreContextRequest, LoadContextRequest } from '../types';
 
 const router = Router();
 
-// In-memory store for context metadata (in production, use a DB)
+// In-memory store — persists for the lifetime of the server process.
+// rawContent acts as fallback cache when 0G Storage download fails
+// (e.g. no OG tokens yet). With real tokens it is overridden by on-chain data.
 const contextStore: Map<string, {
   rootHash: string;
   model: string;
@@ -14,6 +16,7 @@ const contextStore: Map<string, {
   isPublic: boolean;
   summary: string;
   encryptionKey?: string;
+  rawContent: string;            // cache for fallback / private content
   size: number;
   timestamp: number;
   accessCount: number;
@@ -60,7 +63,7 @@ router.post('/store', async (req: Request, res: Response) => {
 
     const contextId = uploadResult.rootHash;
 
-    // Save metadata
+    // Save metadata + raw content cache for fallback
     contextStore.set(contextId, {
       rootHash: uploadResult.rootHash,
       model: modelName,
@@ -68,6 +71,7 @@ router.post('/store', async (req: Request, res: Response) => {
       isPublic: isPublic || false,
       summary,
       encryptionKey: isPublic ? undefined : encryptionKey,
+      rawContent: storageContent,   // cache so load works without real 0G Storage
       size: uploadResult.size,
       timestamp: Date.now(),
       accessCount: 0,
@@ -113,26 +117,24 @@ router.post('/load', async (req: Request, res: Response) => {
     // Increment access count
     meta.accessCount += 1;
 
-    // Download from 0G Storage
+    // Try 0G Storage first — falls back to in-memory cache if node is unreachable
     let content = await downloadFromZeroGStorage(contextId);
 
     if (!content) {
-      // Try to serve from mock/fallback
-      content = meta.isPublic
-        ? `[Context loaded from 0G Storage - ID: ${contextId}]\nModel: ${meta.model}\nDescription: ${meta.description}`
-        : null;
+      // Serve from in-memory cache (set at store time)
+      content = meta.rawContent || null;
     }
 
     if (!content) {
       return res.status(404).json({ success: false, message: 'Context data not found on 0G Storage' });
     }
 
-    // Decrypt if encrypted
+    // Decrypt if private
     if (!meta.isPublic && meta.encryptionKey) {
       try {
         content = decryptContent(content, meta.encryptionKey);
       } catch {
-        // Content may not be base64 encoded in fallback
+        // content may already be plaintext if upload was a fallback path
       }
     }
 
@@ -196,7 +198,8 @@ router.post('/chat', async (req: Request, res: Response) => {
 
     let content = await downloadFromZeroGStorage(contextId);
     if (!content) {
-      content = `Context: ${meta.description}. ${meta.summary}`;
+      // fallback to in-memory cache
+      content = meta.rawContent || `Context: ${meta.description}. ${meta.summary}`;
     }
 
     if (!meta.isPublic && meta.encryptionKey) {

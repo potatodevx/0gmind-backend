@@ -2,11 +2,11 @@ import { ethers } from 'ethers';
 import { Indexer } from '@0glabs/0g-ts-sdk';
 import { ZeroGStorageUploadResult } from '../types';
 
-const ZERO_G_RPC = process.env.ZERO_G_RPC || 'https://evmrpc-testnet.0g.ai';
-const ZERO_G_STORAGE_INDEXER =
-  process.env.ZERO_G_STORAGE_INDEXER ||
-  'https://indexer-storage-testnet-turbo.0g.ai';
-const PRIVATE_KEY = process.env.BACKEND_PRIVATE_KEY || '';
+// Read lazily so dotenv.config() (called in index.ts) is always applied first
+const getRpc = () => process.env.ZERO_G_RPC || 'https://evmrpc-testnet.0g.ai';
+const getIndexer = () =>
+  process.env.ZERO_G_STORAGE_INDEXER || 'https://indexer-storage-testnet-turbo.0g.ai';
+const getPrivateKey = () => process.env.BACKEND_PRIVATE_KEY || '';
 
 // ─── Encryption helpers (XOR — demo-grade, sufficient for hackathon) ──────────
 export function encryptContent(content: string): { encrypted: string; key: string } {
@@ -43,6 +43,7 @@ export async function uploadToZeroGStorage(
   });
 
   const dataBuffer = Buffer.from(payload, 'utf8');
+  const PRIVATE_KEY = getPrivateKey();
 
   // ── No private key → deterministic mock (dev only) ──
   if (!PRIVATE_KEY) {
@@ -57,9 +58,9 @@ export async function uploadToZeroGStorage(
 
   // ── Real upload via @0glabs/0g-ts-sdk ──────────────────────────────────────
   try {
-    const provider = new ethers.JsonRpcProvider(ZERO_G_RPC);
+    const provider = new ethers.JsonRpcProvider(getRpc());
     const signer = new ethers.Wallet(PRIVATE_KEY, provider);
-    const indexer = new Indexer(ZERO_G_STORAGE_INDEXER);
+    const indexer = new Indexer(getIndexer());
 
     // Write payload to a temp file so the SDK can build the merkle tree
     const os = await import('os');
@@ -77,7 +78,7 @@ export async function uploadToZeroGStorage(
     const rootHash = (tree as { rootHash(): string }).rootHash();
     console.log('[0G Storage] Uploading blob, root hash:', rootHash);
 
-    const [tx, uploadErr] = await indexer.upload(zgFile, ZERO_G_RPC, signer);
+    const [tx, uploadErr] = await indexer.upload(zgFile, getRpc(), signer);
     if (uploadErr !== null) throw new Error(`Upload error: ${uploadErr}`);
 
     await zgFile.close();
@@ -103,15 +104,16 @@ export async function uploadToZeroGStorage(
 
 // ─── Download ──────────────────────────────────────────────────────────────────
 export async function downloadFromZeroGStorage(rootHash: string): Promise<string | null> {
+  const PRIVATE_KEY = getPrivateKey();
   if (!PRIVATE_KEY) {
     console.warn('[0G Storage] BACKEND_PRIVATE_KEY not set — cannot download from 0G Storage.');
     return null;
   }
 
   try {
-    const provider = new ethers.JsonRpcProvider(ZERO_G_RPC);
+    const provider = new ethers.JsonRpcProvider(getRpc());
     const signer = new ethers.Wallet(PRIVATE_KEY, provider);
-    const indexer = new Indexer(ZERO_G_STORAGE_INDEXER);
+    const indexer = new Indexer(getIndexer());
 
     const os = await import('os');
     const path = await import('path');

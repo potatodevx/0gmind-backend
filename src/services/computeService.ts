@@ -1,20 +1,24 @@
 import OpenAI from 'openai';
 
-// 0G Compute Router — get API key at pc.0g.ai → Dashboard → API Keys
-const ZERO_G_COMPUTE_BASE_URL = process.env.ZERO_G_COMPUTE_BASE_URL || 'https://router-api.0g.ai/v1';
-const ZERO_G_COMPUTE_API_KEY = process.env.ZERO_G_COMPUTE_API_KEY || '';
-const ZERO_G_COMPUTE_MODEL = process.env.ZERO_G_COMPUTE_MODEL || 'glm-5';
+// Read lazily so dotenv.config() (called in index.ts) is always applied first
+const getComputeUrl = () => process.env.ZERO_G_COMPUTE_BASE_URL || 'https://router-api.0g.ai/v1';
+const getComputeKey = () => process.env.ZERO_G_COMPUTE_API_KEY || '';
+const getComputeModel = () => process.env.ZERO_G_COMPUTE_MODEL || 'glm-5';
 
+// Client is re-created if key changes (e.g. env reload on nodemon restart)
 let client: OpenAI | null = null;
+let cachedKey = '';
 
 function getClient(): OpenAI {
-  if (!ZERO_G_COMPUTE_API_KEY) {
+  const key = getComputeKey();
+  if (!key) {
     console.warn('[0G Compute] ZERO_G_COMPUTE_API_KEY not set — inference calls will fail. Get a key at pc.0g.ai');
   }
-  if (!client) {
+  if (!client || cachedKey !== key) {
+    cachedKey = key;
     client = new OpenAI({
-      apiKey: ZERO_G_COMPUTE_API_KEY || 'missing-key',
-      baseURL: ZERO_G_COMPUTE_BASE_URL,
+      apiKey: key || 'missing-key',
+      baseURL: getComputeUrl(),
     });
   }
   return client;
@@ -24,7 +28,7 @@ export async function summarizeContext(content: string): Promise<string> {
   try {
     const openai = getClient();
     const response = await openai.chat.completions.create({
-      model: ZERO_G_COMPUTE_MODEL,
+      model: getComputeModel(),
       messages: [
         {
           role: 'system',
@@ -55,7 +59,7 @@ export async function processContextForAgent(
   try {
     const openai = getClient();
     const response = await openai.chat.completions.create({
-      model: ZERO_G_COMPUTE_MODEL,
+      model: getComputeModel(),
       messages: [
         {
           role: 'system',
@@ -76,8 +80,29 @@ export async function processContextForAgent(
     );
   } catch (error) {
     console.error('0G Compute process error:', error);
-    return 'Context loaded from 0G Storage. Ready to continue your previous session.';
+    // Graceful fallback: scan context for relevant sentences
+    return localContextSearch(contextContent, userQuery);
   }
+}
+
+// Simple local keyword-match fallback used when 0G Compute key is not yet set.
+// Returns relevant lines from the context rather than a generic stub.
+function localContextSearch(context: string, query: string): string {
+  const queryWords = query.toLowerCase().split(/\W+/).filter(w => w.length > 3);
+  const lines = context.split(/[\n.]+/).map(l => l.trim()).filter(l => l.length > 10);
+
+  const scored = lines.map(line => {
+    const lower = line.toLowerCase();
+    const hits = queryWords.filter(w => lower.includes(w)).length;
+    return { line, hits };
+  });
+
+  const relevant = scored.filter(s => s.hits > 0).sort((a, b) => b.hits - a.hits).slice(0, 3);
+
+  if (relevant.length > 0) {
+    return `Based on the stored context: ${relevant.map(r => r.line).join(' ')}`;
+  }
+  return `Context loaded from 0G Storage. The context covers: ${context.split(' ').slice(0, 20).join(' ')}...`;
 }
 
 export async function validateContext(content: string): Promise<{

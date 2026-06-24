@@ -1,6 +1,6 @@
-# AgentPass Backend
+# 0GMind Backend
 
-Express.js API server for AgentPass — portable AI memory protocol on 0G.
+Express.js API server for 0GMind — portable AI memory protocol on 0G.
 
 ## Endpoints
 

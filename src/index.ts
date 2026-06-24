@@ -21,7 +21,7 @@ app.use(express.urlencoded({ extended: true }));
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
-    service: 'AgentPass API',
+    service: '0GMind API',
     network: '0G Galileo Testnet',
     timestamp: new Date().toISOString(),
   });
@@ -33,7 +33,7 @@ app.use('/api/context', contextRouter);
 // Root
 app.get('/', (_req, res) => {
   res.json({
-    name: 'AgentPass API',
+    name: '0GMind API',
     version: '1.0.0',
     description: 'Portable AI memory protocol on 0G Storage',
     endpoints: {
@@ -55,7 +55,7 @@ app.get('/', (_req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`AgentPass API running on port ${PORT}`);
+  console.log(`0GMind API running on port ${PORT}`);
   console.log(`Network: 0G Galileo Testnet`);
   console.log(`Health: http://localhost:${PORT}/health`);
 });

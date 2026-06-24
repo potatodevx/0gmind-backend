@@ -1,7 +1,7 @@
 {
-  "name": "agent-pass-backend",
+  "name": "0gmind-backend",
   "version": "1.0.0",
-  "description": "AgentPass backend - portable AI memory protocol on 0G",
+  "description": "0GMind backend - portable AI memory protocol on 0G",
   "main": "dist/index.js",
   "scripts": {
     "dev": "nodemon --exec ts-node src/index.ts",
